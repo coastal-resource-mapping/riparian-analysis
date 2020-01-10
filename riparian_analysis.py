@@ -34,8 +34,10 @@ class ArcPyLogHandler(logging.StreamHandler):
 def run_app():
     """Run the logic of the application"""
     aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, \
-        bec, fwa, lake_ha, harvest, gdb, logger = get_input_parameters()
-    extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, bec, fwa, lake_ha, harvest, gdb, logger)
+        bec, fwa, lake_ha, harvest, buffer_dist, gdb, logger = get_input_parameters()
+    final_lakes, criteria_lakes = extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private,
+                                                bec, fwa, lake_ha, harvest, gdb, logger)
+    buffer_analysis(final_lakes, criteria_lakes, buffer_dist, gdb, logger)
 
 
 ###############################################################################
@@ -59,6 +61,8 @@ def get_input_parameters():
         parser.add_argument('fwa', help='Path to FWA Lakes')
         parser.add_argument('lake_ha', nargs='?', help='Minimum Lake Size')
         parser.add_argument('harvest', help='Harvest Data Constraint')
+        parser.add_argument('buffer', help='Buffer distances for lakes '
+                                           '(comma separated distances in metres eg. 10,30,50)')
         parser.add_argument('gdb', help='Path to Working Geodatabase')
         parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                             help='Log level')
@@ -105,7 +109,7 @@ def get_input_parameters():
             logger.addHandler(arc_handler)
 
         return args.aoi_file, args.aoi_fld, args.aoi_name, args.vri, args.tsa, args.tfl, args.private, args.bec, \
-               args.fwa, args.lake_ha, args.harvest, args.gdb, logger
+               args.fwa, args.lake_ha, args.harvest, args.buffer, args.gdb, logger
 
     except Exception as e:
         logging.error('Unexpected exception. Program terminating.')
@@ -333,6 +337,56 @@ def extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, bec, fwa,
 
     logger.info('********************************')
     logger.info('Completed Extract Lakes Process')
+    logger.info('********************************')
+
+    return final_lakes, criteria_lakes
+
+
+def buffer_analysis(lakes_final, lakes_criteria, buffer_dist, working_gdb, logger):
+    """
+    - Selects lakes based of identified boundaries (TSA, TFL, Private Land, etc)
+    - Creates three buffers around the selected lake
+
+    :param str lakes_final: Lakes_Final from Extract Lakes
+    :param str lakes_criteria: Lakes_Criteria from Extract Lakes
+    :param str buffer_dist: Buffer distances for lakes (comma separated distances in metres eg. 10,30,50)
+    :param str working_gdb: path to the working geodatabase
+    :param logger: logger object for console and log file reporting
+    :return:
+    """
+    logger.info('********************************')
+    logger.info('Initiating Buffer Analysis Process')
+    logger.info('********************************')
+
+    if int(arcpy.GetCount_management(lakes_criteria).getOutput(0)) > 0:
+        lakes = lakes_criteria
+    else:
+        lakes = lakes_final
+
+    logger.info('Buffering {} Lake(s) using the '
+                'following distances: {}...'.format(int(arcpy.GetCount_management(lakes).getOutput(0)), buffer_dist))
+
+    buffer_lakes = os.path.join(working_gdb, 'Lakes_Buffer')
+    buffer_dist = buffer_dist.replace(' ', '').replace(',', ';')
+    fld_buff_dist = 'Buffer_Distance'
+    fld_buff_area = 'Buffer_Area'
+    fld_buff_prmtr = 'Buffer_Prmtr'
+
+    arcpy.MultipleRingBuffer_analysis(lakes, buffer_lakes, buffer_dist, 'Meters', 'distance', 'NONE', 'OUTSIDE_ONLY')
+
+    logger.info('Add Geometry Attributes...')
+
+    arcpy.AddField_management(buffer_lakes, fld_buff_dist, 'DOUBLE')
+    arcpy.CalculateField_management(buffer_lakes, fld_buff_dist, '!distance!', 'PYTHON')
+    arcpy.AddField_management(buffer_lakes, fld_buff_area, 'DOUBLE')
+    arcpy.CalculateField_management(buffer_lakes, fld_buff_area, '!SHAPE.area@HECTARES!', 'PYTHON')
+    arcpy.AddField_management(buffer_lakes, fld_buff_prmtr, 'Double')
+    arcpy.CalculateField_management(buffer_lakes, fld_buff_prmtr, '!SHAPE.length@METERS!', 'PYTHON')
+
+    arcpy.DeleteField_management(buffer_lakes, 'distance')
+
+    logger.info('********************************')
+    logger.info('Completed Buffer Analysis Process')
     logger.info('********************************')
 
     return

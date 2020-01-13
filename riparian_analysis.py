@@ -33,11 +33,15 @@ class ArcPyLogHandler(logging.StreamHandler):
 # helper (manipulates handlers for the logic of the application)
 def run_app():
     """Run the logic of the application"""
-    aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, \
-        bec, fwa, lake_ha, harvest, buffer_dist, gdb, logger = get_input_parameters()
-    final_lakes, criteria_lakes = extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private,
-                                                bec, fwa, lake_ha, harvest, gdb, logger)
-    buffer_analysis(final_lakes, criteria_lakes, buffer_dist, gdb, logger)
+    gdb, aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, \
+        bec, fwa, lake_ha, harvest, buffer_dist, dem, roads, streams, bridges, logger = get_input_parameters()
+
+    final_lakes, criteria_lakes, study_area, vri_aoi = extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private,
+                                                                     bec, fwa, lake_ha, harvest, gdb, logger)
+
+    lakes, buffer_lakes = buffer_analysis(final_lakes, criteria_lakes, buffer_dist, gdb, logger)
+
+    watershed_buffer(study_area, dem, lakes, buffer_lakes, vri_aoi, roads, streams, bridges, gdb, logger)
 
 
 ###############################################################################
@@ -50,6 +54,7 @@ def get_input_parameters():
     try:
         parser = ArgumentParser(
             description='Populate this with a description of the tool')
+        parser.add_argument('gdb', help='Path to Output Geodatabase')
         parser.add_argument('aoi_file', help='Path to AOI')
         parser.add_argument('aoi_fld', nargs='?', help='AOI Name Field')
         parser.add_argument('aoi_name', nargs='?', help='AOI Name Value')
@@ -63,7 +68,10 @@ def get_input_parameters():
         parser.add_argument('harvest', help='Harvest Data Constraint')
         parser.add_argument('buffer', help='Buffer distances for lakes '
                                            '(comma separated distances in metres eg. 10,30,50)')
-        parser.add_argument('gdb', help='Path to Working Geodatabase')
+        parser.add_argument('dem', help='Path to DEM')
+        parser.add_argument('roads', help='Path to Roads')
+        parser.add_argument('streams', help='Path to Streams')
+        parser.add_argument('bridges', help='Path to Coastal Bridges')
         parser.add_argument('--log_level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                             help='Log level')
         parser.add_argument('--log_dir', help='Path to Log Directory')
@@ -108,8 +116,9 @@ def get_input_parameters():
             arc_handler.setFormatter(log_fmt)
             logger.addHandler(arc_handler)
 
-        return args.aoi_file, args.aoi_fld, args.aoi_name, args.vri, args.tsa, args.tfl, args.private, args.bec, \
-               args.fwa, args.lake_ha, args.harvest, args.buffer, args.gdb, logger
+        return args.gdb, args.aoi_file, args.aoi_fld, args.aoi_name, args.vri, args.tsa, args.tfl, args.private,\
+               args.bec, args.fwa, args.lake_ha, args.harvest, args.buffer, args.dem, args.roads, args.streams,\
+               args.bridges, logger
 
     except Exception as e:
         logging.error('Unexpected exception. Program terminating.')
@@ -137,7 +146,7 @@ def extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, bec, fwa,
         :param logger: logger object for console and log file reporting
     """
     logger.info('********************************')
-    logger.info('Initiating Extract Lakes Process')
+    logger.info('Initiating Step 1 - Extract Lakes Process')
     logger.info('********************************')
 
     # Variables
@@ -286,26 +295,25 @@ def extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, bec, fwa,
     arcpy.AddGeometryAttributes_management(final_lakes, "CENTROID_INSIDE")
     arcpy.DeleteField_management(final_lakes, lakes_fields_delete)
 
+    logger.info('--------------------------------')
     if not lake_ha and harvest == 'NONE':
-        logger.info('-------------------------------------')
+        
         logger.info('No criteria selection was used')
     elif not lake_ha and harvest != 'NONE':
         arcpy.Select_analysis(final_lakes, criteria_lakes, harvest)
         lake_count = int(arcpy.GetCount_management(criteria_lakes).getOutput(0))
-        logger.info('-------------------------------------')
         logger.info('Extracting Lakes using Administrative Boundary Criteria ({})'.format(harvest))
     elif lake_ha and harvest == 'NONE':
         arcpy.Select_analysis(final_lakes, criteria_lakes, fld_lake_area + ' >= ' + lake_ha)
         lake_count = int(arcpy.GetCount_management(criteria_lakes).getOutput(0))
-        logger.info('-------------------------------------')
         logger.info('Extracting Lakes using Minimum Lake Size Criteria (Area >= {} Ha)'.format(lake_ha))
     else:
         arcpy.Select_analysis(final_lakes, criteria_lakes, '({}) AND {} >= {}'.format(harvest, fld_lake_area, lake_ha))
         lake_count = int(arcpy.GetCount_management(criteria_lakes).getOutput(0))
-        logger.info('-------------------------------------')
         logger.info('Extracting Lakes using Administrative Boundary ({}) and '
                     'Minimum Lake Size Criteria (Area >= {} Ha)'.format(harvest, lake_ha))
     logger.info('There are {} lake(s) that have been selected'.format(lake_count))
+    logger.info('--------------------------------')
 
     # Create and categorize PROJ_AGE_CLASS_CD_1 into readable age categories
     arcpy.AddField_management(vri_aoi, fld_age_class, "TEXT", "10")
@@ -336,10 +344,10 @@ def extract_lakes(aoi_file, aoi_fld, aoi_name, vri, tsa, tfl, private, bec, fwa,
         arcpy.Delete_management(fc)
 
     logger.info('********************************')
-    logger.info('Completed Extract Lakes Process')
+    logger.info('Completed Step 1 - Extract Lakes Process')
     logger.info('********************************')
 
-    return final_lakes, criteria_lakes
+    return final_lakes, criteria_lakes, aoi_file_study_area, vri_aoi
 
 
 def buffer_analysis(lakes_final, lakes_criteria, buffer_dist, working_gdb, logger):
@@ -355,7 +363,7 @@ def buffer_analysis(lakes_final, lakes_criteria, buffer_dist, working_gdb, logge
     :return:
     """
     logger.info('********************************')
-    logger.info('Initiating Buffer Analysis Process')
+    logger.info('Initiating Step 2 - Buffer Analysis Process')
     logger.info('********************************')
 
     if int(arcpy.GetCount_management(lakes_criteria).getOutput(0)) > 0:
@@ -386,7 +394,157 @@ def buffer_analysis(lakes_final, lakes_criteria, buffer_dist, working_gdb, logge
     arcpy.DeleteField_management(buffer_lakes, 'distance')
 
     logger.info('********************************')
-    logger.info('Completed Buffer Analysis Process')
+    logger.info('Completed Step 2 - Buffer Analysis Process')
+    logger.info('********************************')
+
+    return lakes, buffer_lakes
+
+
+def watershed_buffer(aoi, dem, lakes, buffer_lakes, vri, roads, streams, bridges, working_gdb, logger):
+    """
+    - Creates watershed boundary with the selected lake as the pour point.
+    - Adds characteristics to the buffers around the lake (created in previous tool). These characteristics include:
+    - Biogeoclimatic Ecosystem Classification (BEC)
+    - Age class category
+    - Harvest history
+    - Road density
+
+    :param str aoi: Path to AOI
+    :param str dem: Path to DEM
+    :param str lakes: Lakes to run through
+    :param str buffer_lakes: Buffer polygons from Buffer Analysis
+    :param str vri: Path to VRI clipped to AOI
+    :param str roads: Path to roads
+    :param str streams: Path to streams
+    :param str bridges: Path to coastal bridges
+    :param str working_gdb: Path to working geodatabase
+    :param logger: logger object for console and log file reporting
+    :return:
+    """
+
+    logger.info('********************************')
+    logger.info('Initiating Step 3 - Watershed Buffer Characteristics Process')
+    logger.info('********************************')
+
+    fld_poly_id = 'WATERBODY_POLY_ID'
+    fld_pour_point_id = 'Value'
+    fld_bec_area = 'BEC_Area_Ha'
+    fld_harv_date_old = 'harvest_date'
+    fld_proj_age_old = 'proj_age_1'
+    fld_harv_date_new = 'Harvest_Year'
+    fld_proj_age_new = 'Proj_Age'
+    fld_buff_dist = 'Buffer_Distance'
+    fld_buff_area = 'Buffer_Area'
+    fld_buff_prmtr = 'Buffer_Prmtr'
+    fld_road_length = "Road_Length"
+
+    # Lists
+    keep_fields = ['WATERBODY_POLY_ID', 'BUFF_DIST', 'BEC_ZONE_CODE', 'BEC_SUBZONE', 'BEC_VARIANT',
+                   'HARVEST_DATE', 'PROJ_AGE_1', 'Age_Class', 'BEC_Area_Ha', 'INSIDE_X', 'INSIDE_Y',
+                   'INTERPRETATION_DATE', 'OBJECTID_1', 'OBJECTID', 'Shape', 'Shape_Area', 'Shape_Length',
+                   fld_buff_dist, fld_buff_area, fld_buff_prmtr]
+
+    # Set environment settings
+    arcpy.env.overwriteOutput = True
+    arcpy.env.mask = aoi
+
+    dem_aoi = os.path.join(working_gdb, 'DEM_Study_Area')
+    dem_fill = os.path.join(working_gdb, 'DEM_Fill')
+    flow_dir = os.path.join(working_gdb, 'Flow_Direction')
+    pour_point = os.path.join(working_gdb, 'Pour_Points')
+    watersheds = os.path.join(working_gdb, 'Watersheds')
+    watershed_poly = os.path.join(working_gdb, 'Watersheds_Polygon')
+    selected_watersheds = os.path.join(working_gdb, 'Selected_Watersheds')
+    lakes_buffer_watershed = os.path.join(working_gdb, 'Lakes_Buffer_Watershed')
+    lakes_buffer_attributes = os.path.join(working_gdb, 'Lakes_Buffer_Attributes')
+    selected_roads = os.path.join(working_gdb, 'Selected_Roads')
+    selected_bridges = os.path.join(working_gdb, 'Selected_Bridges')
+    selected_streams = os.path.join(working_gdb, 'Selected_Streams')
+
+    if bridges == '#':
+        bridges = None
+
+    logger.info('Clipping DEM to Study Area...')
+    out_extract = arcpy.sa.ExtractByMask(dem, aoi)
+    out_extract.save(dem_aoi)
+
+    logger.info('Filling DEM...')
+    out_fill = arcpy.sa.Fill(dem_aoi)
+    out_fill.save(dem_fill)
+
+    logger.info('Creating Flow Direction...')
+    out_flow = arcpy.sa.FlowDirection(dem_fill)
+    out_flow.save(flow_dir)
+
+    logger.info('Creating Pour Points from Lakes...')
+    arcpy.PolygonToRaster_conversion(lakes, fld_poly_id, pour_point, 'CELL_CENTER', 'NONE', 25)
+
+    logger.info('Creating Watersheds...')
+    out_watershed = arcpy.sa.Watershed(flow_dir, pour_point, fld_pour_point_id)
+    out_watershed.save(watersheds)
+
+    logger.info('Converting Watersheds to Polygon...')
+    arcpy.RasterToPolygon_conversion(watersheds, watershed_poly, 'SIMPLIFY', fld_pour_point_id)
+
+    arcpy.AddField_management(vri, fld_bec_area, 'Double')
+    arcpy.CalculateField_management(vri, fld_bec_area, '!SHAPE.area@HECTARES!', 'PYTHON')
+
+    logger.info('Cleaning up Watersheds...')
+    watershed_lyr = arcpy.MakeFeatureLayer_management(watershed_poly, 'watershed_lyr')
+    lake_lyr = arcpy.MakeFeatureLayer_management(lakes, 'lakes_lyr')
+    arcpy.SelectLayerByLocation_management(watershed_lyr, 'INTERSECT', lake_lyr, '', 'NEW_SELECTION')
+    arcpy.CopyFeatures_management(watershed_lyr, selected_watersheds)
+    arcpy.Delete_management(watershed_lyr)
+    arcpy.Delete_management(lake_lyr)
+
+    logger.info('Clipping Buffer Zones to Watersheds...')
+    arcpy.Clip_analysis(buffer_lakes, selected_watersheds, lakes_buffer_watershed)
+
+    logger.info('Intersecting Buffer Zones with the VRI...')
+    arcpy.Intersect_analysis([lakes_buffer_watershed, vri], lakes_buffer_attributes, 'ALL')
+
+    logger.info('Cleaning up Fields...')
+    # Delete unnecessary fields
+    fc_fields = [f.name for f in arcpy.ListFields(lakes_buffer_attributes)]
+    delete_fields = list(set(fc_fields) - set(keep_fields))
+    arcpy.DeleteField_management(lakes_buffer_attributes, delete_fields)
+
+    # Loops through identified layers and alters field names.
+    field_list = arcpy.ListFields(lakes_buffer_attributes)
+    for field in field_list:
+        if field.name.lower() == fld_harv_date_old:
+            arcpy.AlterField_management(lakes_buffer_attributes, field.name, fld_harv_date_new, fld_harv_date_new)
+        elif field.name.lower() == fld_proj_age_old:
+            arcpy.AlterField_management(lakes_buffer_attributes, field.name, fld_proj_age_new, 'Projected_Age_Class')
+
+    logger.info('Intersecting Buffer Zones with Roads...')
+    arcpy.Intersect_analysis([roads, lakes_buffer_attributes], selected_roads, 'ALL')
+    lst_buffer_dist = sorted({str(row[0]) for row in arcpy.da.SearchCursor(lakes_buffer_attributes,
+                                                                           fld_buff_dist) if row[0]})
+
+    for dist in lst_buffer_dist:
+        dist_lyr = arcpy.MakeFeatureLayer_management(selected_roads, 'dist_lyr', fld_buff_dist + ' = ' + dist)
+        selected_count = int(arcpy.GetCount_management(dist_lyr).getOutput(0))
+        logger.info('There are {} road(s) within the {} metre buffer.'.format(selected_count, dist))
+        arcpy.Delete_management(dist_lyr)
+
+    arcpy.AddField_management(selected_roads, fld_road_length, 'Double')
+    arcpy.CalculateField_management(selected_roads, fld_road_length, '!SHAPE.length@METERS!', 'PYTHON')
+
+    if bridges:
+        logger.info('Intersecting Buffer Zones with Coastal Bridges...')
+        arcpy.Intersect_analysis([bridges, lakes_buffer_attributes], selected_bridges, 'ALL')
+        for dist in lst_buffer_dist:
+            dist_lyr = arcpy.MakeFeatureLayer_management(selected_bridges, 'dist_lyr', fld_buff_dist + ' = ' + dist)
+            selected_count = int(arcpy.GetCount_management(dist_lyr).getOutput(0))
+            logger.info('There are {} coastal bridges within the {} metre buffer.'.format(selected_count, dist))
+            arcpy.Delete_management(dist_lyr)
+
+    logger.info('Intersecting Buffer Zones with Streams...')
+    arcpy.Intersect_analysis((lakes_buffer_attributes, streams), selected_streams, 'ALL')
+
+    logger.info('********************************')
+    logger.info('Completed Step 3 - Watershed Buffer Characteristics Process')
     logger.info('********************************')
 
     return
